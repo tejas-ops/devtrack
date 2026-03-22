@@ -1,0 +1,57 @@
+# .dockerignore — tells Docker what NOT to copy into the image
+# Works exactly like .gitignore but for Docker builds.
+#
+# WHY this matters:
+#   1. Smaller build context → faster docker build
+#   2. No secrets ending up in your image (node_modules, .env files)
+#   3. No test files in production image
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# Git
+.git/
+.gitignore
+
+# Secrets and config (NEVER put these in a Docker image)
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# Documentation
+*.md
+docs/
+
+# CI/CD files (not needed at runtime)
+Jenkinsfile
+.github/
+terraform/
+ansible/
+k8s/
+
+# Demo files (not needed in production)
+run_demo.py
+test_demo.py

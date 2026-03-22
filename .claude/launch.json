@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "DevTrack FastAPI (uvicorn)",
+      "runtimeExecutable": "/Users/tejaspuli/Desktop/devtrack/.venv/bin/python3",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "DevTrack Demo Server (stdlib)",
+      "runtimeExecutable": "/Users/tejaspuli/Desktop/devtrack/.venv/bin/python3",
+      "runtimeArgs": ["run_demo.py"],
+      "port": 8000
+    }
+  ]
+}

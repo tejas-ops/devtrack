@@ -1,0 +1,29 @@
+# prometheus.yml — tells Prometheus WHAT to scrape and HOW OFTEN
+#
+# Prometheus works by PULLING metrics from targets (scraping)
+# unlike traditional monitoring that pushes metrics to a server.
+# Your app exposes /metrics — Prometheus fetches it every 15 seconds.
+
+global:
+  scrape_interval:     15s   # scrape every target every 15 seconds
+  evaluation_interval: 15s   # evaluate alerting rules every 15 seconds
+
+scrape_configs:
+  # ── Prometheus scrapes itself ──
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── Scrape our DevTrack API ──
+  - job_name: "devtrack-api"
+    metrics_path: /metrics          # where our app exposes metrics
+    static_configs:
+      - targets: ["devtrack-api:8000"]
+        # "devtrack-api" = Docker Compose service name (Compose handles DNS)
+    # In Kubernetes, you'd use a ServiceMonitor CRD instead of static_configs
+
+  # ── Node Exporter (if you add it) ──
+  # Exposes OS-level metrics: CPU, memory, disk, network
+  # - job_name: "node-exporter"
+  #   static_configs:
+  #     - targets: ["node-exporter:9100"]

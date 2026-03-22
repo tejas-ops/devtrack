@@ -1,0 +1,230 @@
+---
+# playbook.yml — configure a VM to be a Jenkins build agent
+#
+# INTERVIEW MUST-KNOWS:
+#   Playbook  = this file — defines WHAT to configure on WHICH hosts
+#   Play      = a group of tasks targeting specific hosts
+#   Task      = one action (install package, create file, run command)
+#   Module    = the action type (apt, copy, service, template, etc.)
+#   Handler   = a task that only runs when NOTIFIED (e.g. restart nginx after config change)
+#   Inventory = the list of hosts to configure (hosts.ini or dynamic inventory)
+#
+# Run with:
+#   ansible-playbook playbook.yml -i inventory/hosts.ini --ask-become-pass
+#   -i = inventory file   --ask-become-pass = prompt for sudo password
+
+# ─── Play 1: Configure the Jenkins build agent ────────────────────────────────
+- name: Configure DevTrack build agent
+  hosts: build_agents     # group name from inventory file
+  become: true            # run tasks with sudo (become = privilege escalation)
+  become_method: sudo
+
+  # ── Variables for this play ──
+  vars:
+    app_user:    devtrack
+    app_dir:     /opt/devtrack
+    python_ver:  "3.11"
+    docker_gpg:  "https://download.docker.com/linux/ubuntu/gpg"
+    jenkins_url: "https://pkg.jenkins.io/debian-stable"
+
+  # ── Pre-tasks: run before all other tasks ──
+  pre_tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache:     true
+        cache_valid_time: 3600   # only update if cache is older than 1 hour
+        # This is idempotent — running it twice has the same result as running it once
+        # IDEMPOTENCY is a core Ansible principle
+
+  # ── Tasks: the main configuration ──────────────────────────────────────────
+  tasks:
+
+    # ── Install system packages ──
+    - name: Install required system packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - git
+          - unzip
+          - python3
+          - python3-pip
+          - python3-venv
+          - openjdk-17-jdk      # Jenkins requires Java
+          - ca-certificates
+          - gnupg
+          - apt-transport-https
+        state: present   # ensure installed (don't reinstall if already present)
+
+    # ── Create application user ──
+    - name: Create devtrack user
+      ansible.builtin.user:
+        name:    "{{ app_user }}"   # {{ }} = Jinja2 templating — inserts variable value
+        shell:   /bin/bash
+        system:  true              # system user (no login, no home by default)
+        home:    "{{ app_dir }}"
+        create_home: true
+
+    # ── Install Docker ──
+    - name: Add Docker GPG key
+      ansible.builtin.apt_key:
+        url:   "{{ docker_gpg }}"
+        state: present
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo:  "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        # ansible_lsb.codename = automatically detected (e.g. "jammy" for Ubuntu 22.04)
+        state: present
+
+    - name: Install Docker Engine
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+      notify: restart docker   # trigger the handler when this task makes a change
+
+    - name: Add devtrack user to docker group
+      ansible.builtin.user:
+        name:   "{{ app_user }}"
+        groups: docker
+        append: true   # append to existing groups (don't replace them)
+      # After this, the user can run docker without sudo
+
+    # ── Install kubectl ──
+    - name: Download kubectl binary
+      ansible.builtin.get_url:
+        url:  "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: "0755"   # rwxr-xr-x — executable
+
+    # ── Install Terraform ──
+    - name: Download Terraform
+      ansible.builtin.unarchive:
+        src:        "https://releases.hashicorp.com/terraform/1.7.0/terraform_1.7.0_linux_amd64.zip"
+        dest:       /usr/local/bin
+        remote_src: true   # download FROM the remote VM (not from Ansible controller)
+        mode:       "0755"
+
+    # ── Install Trivy (security scanner) ──
+    - name: Add Trivy apt repository
+      ansible.builtin.apt_repository:
+        repo:  "deb https://aquasecurity.github.io/trivy-repo/deb generic main"
+        state: present
+
+    - name: Install Trivy
+      ansible.builtin.apt:
+        name:         trivy
+        state:        present
+        update_cache: true
+
+    # ── Configure Docker daemon ──
+    - name: Configure Docker daemon
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "log-driver":  "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "default-ulimits": {
+              "nofile": {
+                "Name": "nofile",
+                "Hard": 65536,
+                "Soft": 65536
+              }
+            }
+          }
+        mode: "0644"
+      notify: restart docker   # config changed → restart docker
+
+    # ── Create application directory structure ──
+    - name: Create app directories
+      ansible.builtin.file:
+        path:  "{{ item }}"   # 'item' = current value in the loop
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode:  "0755"
+      loop:
+        - "{{ app_dir }}"
+        - "{{ app_dir }}/logs"
+        - "{{ app_dir }}/config"
+      # loop = run this task once for each item in the list
+      # Same as writing 3 separate file tasks — much more concise
+
+    # ── Deploy configuration file from template ──
+    - name: Deploy app configuration
+      ansible.builtin.template:
+        src:   templates/app.env.j2   # Jinja2 template file on Ansible controller
+        dest:  "{{ app_dir }}/config/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode:  "0600"   # rw------- (only owner can read — contains secrets)
+      notify: reload app
+
+    # ── Ensure Docker service is running ──
+    - name: Ensure Docker is running and enabled
+      ansible.builtin.service:
+        name:    docker
+        state:   started    # start if not running
+        enabled: true       # start on boot
+
+    # ── Verify installations ──
+    - name: Verify docker is working
+      ansible.builtin.command: docker --version
+      register: docker_version    # store command output in a variable
+      changed_when: false         # this task never "changes" anything — just a check
+
+    - name: Print docker version
+      ansible.builtin.debug:
+        msg: "Docker installed: {{ docker_version.stdout }}"
+      # debug module prints to the Ansible output — useful for verification
+
+    - name: Verify kubectl
+      ansible.builtin.command: kubectl version --client
+      register:     kubectl_version
+      changed_when: false
+
+    - name: Verify terraform
+      ansible.builtin.command: terraform version
+      register:     tf_version
+      changed_when: false
+
+  # ── Handlers: run ONLY when notified by a task ─────────────────────────────
+  # Handlers run ONCE at the end of the play, even if notified multiple times
+  # This prevents Docker from restarting 3 times if 3 tasks notify it
+  handlers:
+    - name: restart docker
+      ansible.builtin.service:
+        name:  docker
+        state: restarted
+
+    - name: reload app
+      ansible.builtin.command: "docker compose -f {{ app_dir }}/docker-compose.yml restart"
+      args:
+        chdir: "{{ app_dir }}"
+
+
+# ─── Play 2: Smoke test after configuration ────────────────────────────────────
+- name: Smoke test — verify the agent is ready
+  hosts:   build_agents
+  become:  false   # run as normal user, not root
+
+  tasks:
+    - name: Check docker socket accessible
+      ansible.builtin.command: docker ps
+      changed_when: false
+
+    - name: Pull a test image to verify ACR access
+      ansible.builtin.command: docker pull python:3.11-slim
+      changed_when: false
+
+    - name: Report agent ready
+      ansible.builtin.debug:
+        msg: "✅ Build agent {{ inventory_hostname }} is configured and ready"

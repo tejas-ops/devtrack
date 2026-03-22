@@ -1,0 +1,27 @@
+# configmap.yaml — store NON-SECRET configuration for your app
+#
+# ConfigMap vs Secret:
+#   ConfigMap = plain text, visible in kubectl get configmap -o yaml
+#   Secret    = base64-encoded, should be backed by Azure KeyVault / AWS Secrets Manager
+#
+# Rule: anything you'd put in a .env file but isn't a password → ConfigMap
+#       passwords, API keys, tokens → Secret (then backed by a vault)
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name:      devtrack-config
+  namespace: devtrack
+  labels:
+    app: devtrack
+data:
+  # These become environment variables in the Deployment (see envFrom below)
+  APP_ENV:   "production"
+  LOG_LEVEL: "INFO"
+  PORT:      "8000"
+
+  # You can also store entire config files in a ConfigMap:
+  # prometheus.yml: |
+  #   global:
+  #     scrape_interval: 15s
+  #   ...

@@ -1,0 +1,15 @@
+# namespace.yaml — logical isolation within your Kubernetes cluster
+#
+# WHY namespaces?
+#   - Isolate dev / staging / prod on the same cluster
+#   - Apply RBAC per namespace (devs can't touch prod)
+#   - Resource quotas per namespace (prod gets more CPU/RAM than dev)
+#   - Easier to delete an entire environment: kubectl delete namespace devtrack-dev
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devtrack
+  labels:
+    app:         devtrack
+    managed-by:  kubectl    # or 'helm' if using Helm charts

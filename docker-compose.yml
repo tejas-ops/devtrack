@@ -1,0 +1,162 @@
+# docker-compose.yml — run the ENTIRE stack with one command: docker compose up
+#
+# WHY Docker Compose?
+#   Local development: run app + DB + monitoring all together
+#   Each service = one container
+#   They talk to each other via the internal 'devtrack-network'
+#
+# INTERVIEW QUESTION: "Difference between Docker and Docker Compose?"
+#   Docker = run a SINGLE container
+#   Docker Compose = orchestrate MULTIPLE containers together locally
+#   Kubernetes = orchestrate containers at SCALE in production
+
+version: "3.9"   # Compose file format version (3.9 supports all modern features)
+
+# ─── Services ─────────────────────────────────────────────────────────────────
+services:
+
+  # ── 1. Our FastAPI application ──────────────────────────────────────────────
+  devtrack-api:
+    build:
+      context: .          # look for Dockerfile in current directory
+      dockerfile: Dockerfile
+    container_name: devtrack-api
+    restart: unless-stopped
+    # restart policy:
+    #   "no"             = never restart (default)
+    #   "always"         = always restart (even on clean shutdown)
+    #   "unless-stopped" = restart on crash, but not if you docker stop it manually
+    #   "on-failure"     = only restart on non-zero exit code
+
+    ports:
+      - "8000:8000"   # host_port:container_port
+                      # browser hits localhost:8000 → routes to port 8000 inside container
+
+    environment:
+      # Environment variables injected into the container at runtime
+      # NEVER hardcode secrets — use variables pulled from .env or a secret manager
+      DATABASE_URL:  "postgresql://devtrack:password@postgres:5432/devtrack"
+      # 'postgres' here = the service name above — Compose creates DNS for it automatically
+      APP_ENV:       "development"
+      LOG_LEVEL:     "INFO"
+
+    env_file:
+      - .env   # load additional variables from .env file (add this file to .gitignore!)
+
+    depends_on:
+      postgres:
+        condition: service_healthy   # wait until postgres is HEALTHY before starting API
+      # Without depends_on, the API might start before the DB is ready → connection errors
+
+    healthcheck:
+      test:     ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s      # check every 30 seconds
+      timeout:  5s       # fail if no response within 5 seconds
+      retries:  3        # mark unhealthy after 3 consecutive failures
+      start_period: 15s  # give the app 15s to start before checking
+
+    networks:
+      - devtrack-network
+
+    volumes:
+      # Mount source code for hot-reload during development
+      # Comment this out for production — use the baked-in copy from Dockerfile instead
+      - ./app:/app/app
+
+
+  # ── 2. PostgreSQL database ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine   # Alpine = minimal Linux base → smaller image
+    container_name: devtrack-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB:       devtrack    # database name to create on startup
+      POSTGRES_USER:     devtrack    # username
+      POSTGRES_PASSWORD: password    # password — use Docker secrets in production!
+
+    ports:
+      - "5432:5432"   # expose so you can connect with psql or DBeaver from your laptop
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Named volume = data persists even when you stop/remove the container
+      # Without this, all data is lost when the container stops
+
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # Any .sql files in docker-entrypoint-initdb.d/ run automatically on first start
+
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U devtrack -d devtrack"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 10s
+
+    networks:
+      - devtrack-network
+
+
+  # ── 3. Prometheus — metrics collection ──────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: devtrack-prometheus
+    restart: unless-stopped
+
+    ports:
+      - "9090:9090"   # Prometheus UI at http://localhost:9090
+
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # :ro = mount as read-only (container can't accidentally modify config)
+      - prometheus-data:/prometheus
+
+    command:
+      # Pass CLI flags to Prometheus
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"   # keep 15 days of metrics
+
+    networks:
+      - devtrack-network
+
+
+  # ── 4. Grafana — dashboards ──────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: devtrack-grafana
+    restart: unless-stopped
+
+    ports:
+      - "3000:3000"   # Grafana UI at http://localhost:3000
+
+    environment:
+      GF_SECURITY_ADMIN_USER:     admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123   # change in production!
+      GF_USERS_ALLOW_SIGN_UP:    "false"
+
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      # provisioning = auto-configure datasources and dashboards on startup
+
+    depends_on:
+      - prometheus
+
+    networks:
+      - devtrack-network
+
+
+# ─── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  devtrack-network:
+    driver: bridge
+    # bridge = default network type — containers on same bridge can reach each other by name
+    # The API connects to Postgres with hostname 'postgres' — Compose handles the DNS
+
+
+# ─── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  postgres-data:    # PostgreSQL data persists across container restarts
+  prometheus-data:  # Prometheus time-series data
+  grafana-data:     # Grafana dashboards and settings

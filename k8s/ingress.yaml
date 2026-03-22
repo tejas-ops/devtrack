@@ -1,0 +1,47 @@
+# ingress.yaml — routes external HTTP/HTTPS traffic into the cluster
+#
+# INTERVIEW MUST-KNOW:
+# Ingress sits at the EDGE of your cluster.
+# It handles: TLS termination, routing rules, rate limiting, auth.
+# You need an Ingress CONTROLLER installed (e.g. nginx, traefik, or Azure App Gateway).
+#
+# Flow: Internet → Ingress Controller → Service → Pods
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name:      devtrack-ingress
+  namespace: devtrack
+  labels:
+    app: devtrack
+  annotations:
+    # Tell K8s which Ingress controller handles this
+    kubernetes.io/ingress.class: nginx
+
+    # Cert-Manager auto-provisions Let's Encrypt TLS certificates
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+
+    # NGINX-specific: enable CORS, rate limiting, request size
+    nginx.ingress.kubernetes.io/enable-cors:        "true"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PATCH, OPTIONS"
+    nginx.ingress.kubernetes.io/limit-rps:          "100"   # max 100 req/sec per IP
+    nginx.ingress.kubernetes.io/proxy-body-size:    "1m"
+
+spec:
+  # TLS configuration — cert-manager creates and renews the certificate automatically
+  tls:
+    - hosts:
+        - api.devtrack.yourdomain.com
+      secretName: devtrack-tls   # cert-manager stores the cert in this secret
+
+  rules:
+    - host: api.devtrack.yourdomain.com
+      http:
+        paths:
+          - path:     /           # route ALL paths to our service
+            pathType: Prefix
+            backend:
+              service:
+                name: devtrack-api   # matches our Service name
+                port:
+                  number: 80

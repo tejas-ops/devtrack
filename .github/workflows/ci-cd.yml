@@ -1,0 +1,268 @@
+# ci-cd.yml — GitHub Actions workflow for DevTrack
+#
+# INTERVIEW MUST-KNOWS:
+#   Workflow  = this entire file — defines when and what to run
+#   Job       = a set of steps running on one runner (VM)
+#   Step      = a single command or action
+#   Action    = a reusable step from the marketplace (actions/checkout, etc.)
+#   Runner    = the VM that runs the job (ubuntu-latest, windows-latest, etc.)
+#   Secret    = encrypted variable stored in GitHub repo settings
+#
+# GitHub Actions vs Jenkins:
+#   GitHub Actions = YAML, hosted runners, tight GitHub integration, free for public repos
+#   Jenkins        = Groovy, self-hosted, more flexible, requires maintenance
+
+name: DevTrack CI/CD
+
+# ── When does this workflow run? ──────────────────────────────────────────────
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'   # wildcard: matches release/1.0, release/2.0, etc.
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+    # Only run on PRs targeting main — not every PR in the repo
+
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment target'
+        required:    true
+        default:     'dev'
+        type:        choice
+        options:
+          - dev
+          - staging
+          - prod
+
+# ── Global env vars available to all jobs ─────────────────────────────────────
+env:
+  APP_NAME:  devtrack-api
+  REGISTRY:  myregistry.azurecr.io
+  IMAGE_TAG: ${{ github.sha }}   # full git SHA as image tag
+  SHORT_SHA: ${{ github.sha[:8] }}
+
+# ── Cancel in-progress runs when a new one is triggered (saves cost) ──────────
+concurrency:
+  group:              ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+jobs:
+# ═══════════════════════════════════════════════════════════════════════════════
+
+  # ─── Job 1: Tests ────────────────────────────────────────────────────────────
+  test:
+    name:    "🧪 Tests & Lint"
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # 'uses' = use a published GitHub Action from the marketplace
+        # actions/checkout = official action to clone the repo into the runner
+
+      # Step 2: Set up Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache:          pip       # cache pip downloads between runs (faster)
+
+      # Step 3: Install dependencies
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pylint pytest-cov
+          # | = multi-line run command
+
+      # Step 4: Lint (code quality check)
+      - name: Run linter
+        run: pylint app/ --fail-under=7.0
+
+      # Step 5: Run tests with coverage
+      - name: Run tests
+        run: |
+          pytest tests/ \
+            --junitxml=test-results.xml \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-fail-under=80
+
+      # Step 6: Upload test results (visible in GitHub PR checks)
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()   # upload even if tests fail (so you can see WHAT failed)
+        with:
+          name:           test-results
+          path:           test-results.xml
+          retention-days: 7
+
+      # Step 7: Upload coverage report
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
+
+      # Step 8: Post coverage summary as PR comment
+      - name: Coverage comment on PR
+        uses: py-cov-action/python-coverage-comment-action@v3
+        if:   github.event_name == 'pull_request'
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN is automatically provided by GitHub — no setup needed
+
+
+  # ─── Job 2: Build & push Docker image ────────────────────────────────────────
+  build:
+    name:    "🐳 Build & Push Image"
+    runs-on: ubuntu-latest
+    needs:   test    # only run if 'test' job passes
+    # 'needs' creates a dependency chain between jobs
+
+    # Only build on pushes to main, not on PRs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    outputs:
+      # Pass the image tag to downstream jobs
+      image-tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Docker Buildx = extended build capabilities (multi-platform, cache)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Log in to Azure Container Registry
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_CLIENT_ID }}       # stored in GitHub Secrets
+          password: ${{ secrets.ACR_CLIENT_SECRET }}   # never visible in logs
+
+      # Generate image tags and labels (follows Docker best practices)
+      - name: Extract Docker metadata
+        id:   meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.APP_NAME }}
+          tags: |
+            type=sha,prefix=,suffix=,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+          # This generates tags like:
+          #   myregistry.azurecr.io/devtrack-api:abc1234
+          #   myregistry.azurecr.io/devtrack-api:main
+          #   myregistry.azurecr.io/devtrack-api:1.2.3
+
+      # Build and push the image (uses layer caching for speed)
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context:    .
+          push:       true
+          tags:       ${{ steps.meta.outputs.tags }}
+          labels:     ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha           # use GitHub Actions cache for Docker layers
+          cache-to:   type=gha,mode=max  # save layers to cache
+
+
+  # ─── Job 3: Security scan ────────────────────────────────────────────────────
+  security:
+    name:    "🔒 Security Scan"
+    runs-on: ubuntu-latest
+    needs:   build
+    if:      github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:    "${{ env.REGISTRY }}/${{ env.APP_NAME }}:${{ env.IMAGE_TAG }}"
+          format:       sarif         # SARIF = standard security report format
+          output:       trivy.sarif
+          severity:     CRITICAL,HIGH
+          exit-code:    "1"           # fail job if vulnerabilities found
+
+      # Upload findings to GitHub Security tab
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if:   always()
+        with:
+          sarif_file: trivy.sarif
+
+
+  # ─── Job 4: Deploy ───────────────────────────────────────────────────────────
+  deploy:
+    name:    "🚀 Deploy to ${{ inputs.environment || 'dev' }}"
+    runs-on: ubuntu-latest
+    needs:   [build, security]
+    if:      github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    environment:
+      name: ${{ inputs.environment || 'dev' }}
+      # GitHub Environments support:
+      #   - Required reviewers (approval gate for prod)
+      #   - Environment-specific secrets
+      #   - Deployment history in GitHub UI
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Azure login using a Service Principal
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          # AZURE_CREDENTIALS = JSON with: clientId, clientSecret, tenantId, subscriptionId
+          # Create with: az ad sp create-for-rbac --name devtrack-github --sdk-auth
+
+      # Get AKS credentials (writes kubeconfig to ~/.kube/config)
+      - name: Get AKS credentials
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group:  devtrack-rg
+          cluster-name:    devtrack-aks
+
+      # Update the image in Kubernetes
+      - name: Deploy to AKS
+        run: |
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:8}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.APP_NAME }}:${SHORT_SHA}"
+
+          kubectl set image deployment/devtrack-api \
+            devtrack-api="${IMAGE}" \
+            --namespace=devtrack
+
+          kubectl rollout status deployment/devtrack-api \
+            --namespace=devtrack \
+            --timeout=300s
+
+          echo "✅ Deployed ${IMAGE} to ${{ inputs.environment || 'dev' }}"
+
+      # Notify Slack on deployment
+      - name: Notify Slack
+        if:   always()   # run even if deploy fails
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: "C01234ABCDE"   # your Slack channel ID
+          slack-message: |
+            ${{ job.status == 'success' && '✅' || '❌' }} DevTrack deployment
+            *Branch:* ${{ github.ref_name }}
+            *Commit:* ${{ github.sha }}
+            *Status:* ${{ job.status }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

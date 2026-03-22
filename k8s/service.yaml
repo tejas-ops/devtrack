@@ -1,0 +1,38 @@
+# service.yaml — stable network endpoint for our pods
+#
+# INTERVIEW MUST-KNOW:
+# Pods are EPHEMERAL — they get new IPs when restarted.
+# A Service gives a STABLE IP + DNS name that always routes to healthy pods.
+#
+# Service Types:
+#   ClusterIP    = internal only (default) — only reachable within the cluster
+#   NodePort     = exposes on each node's IP at a static port (not for production)
+#   LoadBalancer = creates a cloud load balancer (Azure Load Balancer / AWS ELB)
+#   ExternalName = DNS alias to an external service
+
+apiVersion: v1
+kind: Service
+metadata:
+  name:      devtrack-api
+  namespace: devtrack
+  labels:
+    app: devtrack
+  annotations:
+    # Azure-specific: internal load balancer (not internet-facing)
+    # Remove this annotation to get a public load balancer
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+
+spec:
+  type: ClusterIP   # internal — traffic comes in via Ingress (see ingress.yaml)
+
+  selector:
+    app: devtrack   # routes traffic to pods with this label
+                    # K8s watches for healthy pods matching this selector
+
+  ports:
+    - name:       http
+      port:       80          # port clients use to reach the service
+      targetPort: 8000        # port on the pod to forward to
+      protocol:   TCP
+  # curl http://devtrack-api.devtrack.svc.cluster.local/health
+  # Format: <service-name>.<namespace>.svc.cluster.local

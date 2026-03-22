@@ -1,0 +1,164 @@
+# deployment.yaml — tells Kubernetes HOW to run our application
+#
+# INTERVIEW MUST-KNOWS (these come up constantly):
+#
+# Pod vs Deployment:
+#   Pod        = one or more containers running together (the unit of compute in K8s)
+#   Deployment = manages a set of identical Pods + handles rolling updates
+#
+# ReplicaSet:
+#   A Deployment creates a ReplicaSet, which ensures N pods are always running.
+#   If a pod crashes, the ReplicaSet creates a new one automatically.
+#
+# Rolling Update (the default):
+#   K8s replaces pods ONE AT A TIME (not all at once)
+#   → zero downtime deployments
+#   → if new version is broken, you can rollback: kubectl rollout undo deployment/devtrack-api
+#
+# Resource Requests vs Limits:
+#   requests = minimum guaranteed resources (used for scheduling decisions)
+#   limits   = maximum allowed (container is killed/throttled if exceeded)
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name:      devtrack-api
+  namespace: devtrack
+  labels:
+    app:     devtrack
+    tier:    backend
+    version: "1.0.0"
+  annotations:
+    # Deployment notes — visible in kubectl describe deployment devtrack-api
+    kubernetes.io/change-cause: "Initial deployment of DevTrack API v1.0.0"
+
+spec:
+  replicas: 3   # run 3 identical pods → high availability
+                # if one pod crashes, 2 are still serving traffic
+
+  # The Deployment uses this selector to know which pods it manages
+  # It MUST match the labels in spec.template.metadata.labels
+  selector:
+    matchLabels:
+      app: devtrack
+
+  # Rolling update strategy — ensures zero downtime
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1   # at most 1 pod can be unavailable during the update
+      maxSurge:       1   # at most 1 extra pod can exist during the update
+      # With 3 replicas: during rollout → max 4 pods exist, min 2 are serving
+
+  # ── Pod template — defines what each Pod looks like ──
+  template:
+    metadata:
+      labels:
+        app:     devtrack   # MUST match selector.matchLabels above
+        version: "1.0.0"
+      annotations:
+        # Prometheus auto-discovery: Prometheus scrapes pods with these annotations
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8000"
+        prometheus.io/path:   "/metrics"
+
+    spec:
+      # Run as non-root (matches our Dockerfile USER directive)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser:    1001
+        runAsGroup:   1001
+        fsGroup:      1001   # files created by the container belong to this group
+
+      containers:
+        - name:  devtrack-api   # name of the container inside the pod
+          image: myregistry.azurecr.io/devtrack-api:1.0.0
+          # In CI/CD: this gets replaced with the actual image tag built in the pipeline
+          # e.g. myregistry.azurecr.io/devtrack-api:abc1234 (git SHA)
+
+          imagePullPolicy: Always
+          # Always     = always pull from registry (ensures latest build)
+          # IfNotPresent = only pull if not cached (faster but can get stale)
+          # Never       = never pull (only use locally built images)
+
+          ports:
+            - containerPort: 8000
+              name:          http
+
+          # ── Load environment from ConfigMap and Secret ──
+          envFrom:
+            - configMapRef:
+                name: devtrack-config    # injects all keys from ConfigMap as env vars
+            - secretRef:
+                name: devtrack-secrets   # injects all keys from Secret as env vars
+
+          # ── Individual env vars (override or add to the above) ──
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name   # inject the pod's own name (useful for logging)
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          # ── Resource requests and limits ──
+          resources:
+            requests:
+              cpu:    "100m"    # 100 millicores = 0.1 CPU cores
+              memory: "128Mi"   # 128 Mebibytes
+            limits:
+              cpu:    "500m"    # 500 millicores = 0.5 CPU cores
+              memory: "256Mi"   # 256 Mebibytes
+            # WHY set these? Prevents one misbehaving app from starving other pods.
+
+          # ── Liveness Probe: is the container alive? ──
+          # If this FAILS → K8s RESTARTS the container
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15   # wait 15s after start before first check
+            periodSeconds:       20   # check every 20 seconds
+            failureThreshold:    3    # restart after 3 consecutive failures
+            timeoutSeconds:      5    # fail if no response in 5 seconds
+
+          # ── Readiness Probe: is the container ready to receive traffic? ──
+          # If this FAILS → K8s REMOVES the pod from the Service's load balancer
+          # (pod stays running but gets no traffic until it recovers)
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds:       10
+            failureThreshold:    3
+            timeoutSeconds:      3
+
+          # ── Graceful shutdown ──
+          lifecycle:
+            preStop:
+              exec:
+                # Give in-flight requests 10s to complete before the pod is killed
+                # This prevents 502 errors during rolling updates
+                command: ["/bin/sh", "-c", "sleep 10"]
+
+      # ── Image pull secret for private registry ──
+      imagePullSecrets:
+        - name: acr-pull-secret
+        # kubectl create secret docker-registry acr-pull-secret \
+        #   --docker-server=myregistry.azurecr.io \
+        #   --docker-username=<service-principal-id> \
+        #   --docker-password=<service-principal-secret>
+
+      # ── Topology spread: spread pods across nodes ──
+      topologySpreadConstraints:
+        - maxSkew:            1        # at most 1 pod difference between nodes
+          topologyKey:        kubernetes.io/hostname
+          whenUnsatisfiable:  DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: devtrack
+          # This ensures all 3 pods go to different nodes → true HA
+          # If one node goes down, only 1 of 3 pods is lost
