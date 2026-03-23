@@ -86,10 +86,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # CMD = the default command when the container starts
 # Using array form (not string form) → avoids shell interpretation issues
 # uvicorn = ASGI server that runs our FastAPI app
-CMD ["uvicorn", "app.main:app",
-     "--host", "0.0.0.0",
-     "--port", "8000",
-     "--workers", "2"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
 # --host 0.0.0.0 → listen on ALL interfaces (not just localhost)
 #                  without this, the app is unreachable from outside the container
 # --workers 2    → 2 worker processes = handle 2 requests simultaneously
