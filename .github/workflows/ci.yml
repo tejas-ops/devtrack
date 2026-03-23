@@ -1,0 +1,121 @@
+# ═══════════════════════════════════════════════════════════════
+# CI Pipeline — DevTrack API
+#
+# WHAT THIS DOES (in order):
+#   1. Triggered on every push to main, and on every PR targeting main
+#   2. Job 1 — test: run pytest and upload a coverage report
+#   3. Job 2 — docker: build the Docker image (push to GHCR on main only)
+#
+# WHY TWO JOBS?
+#   - They run in parallel → faster feedback
+#   - If tests fail, the docker job still runs (independent)
+#   - You could add `needs: [test]` to block docker on test failure
+#
+# GHCR = GitHub Container Registry (free, no DockerHub account needed)
+# ═══════════════════════════════════════════════════════════════
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Shared env vars available to all jobs
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/devtrack-api
+
+jobs:
+
+  # ─── Job 1: Test ──────────────────────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest   # GitHub-hosted runner (free for public repos)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # Clones the repo into the runner's workspace
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"          # Cache pip downloads between runs (faster CI)
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest with coverage
+        run: |
+          pytest tests/ -v \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+        # -v                     → verbose: print each test name + pass/fail
+        # --cov=app              → measure coverage for the app/ directory
+        # --cov-report=xml       → save XML report for the next step
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+        # Uploads coverage.xml so you can download it from the Actions UI
+        # In a real team: send this to Codecov or SonarCloud instead
+
+  # ─── Job 2: Docker Build ──────────────────────────────────────────────────
+  docker:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+
+    # Required permissions to push to GitHub Container Registry
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        # GITHUB_TOKEN is automatically created by GitHub for every workflow run
+        # It has write access to GHCR for the repo's owner — no secrets to manage
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        # Buildx = extended Docker build with BuildKit backend
+        # Enables: multi-platform builds, layer caching, and faster builds
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+        # This generates image tags automatically:
+        #   sha-abc1234   → unique tag per commit (great for traceability)
+        #   main          → branch name tag
+        #   latest        → only on pushes to main (not on PRs)
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha        # Read layer cache from GitHub Actions cache
+          cache-to: type=gha,mode=max # Write updated cache back
+        # push: only push the image when merging to main (not on PRs)
+        # This prevents PRs from polluting the registry with unreviewed images
+        # cache-from/cache-to: reuse Docker layer cache across runs → 60s → 10s builds
