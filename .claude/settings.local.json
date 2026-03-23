@@ -2,7 +2,17 @@
   "permissions": {
     "allow": [
       "mcp__Claude_Preview__preview_start",
-      "Bash(/Users/tejaspuli/Desktop/devtrack/.venv/bin/uvicorn --version)"
+      "Bash(/Users/tejaspuli/Desktop/devtrack/.venv/bin/uvicorn --version)",
+      "Read(//private/tmp/**)",
+      "Bash(python3 -c \":*)",
+      "Bash(pip3 install:*)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(gh pr:*)",
+      "Bash(brew install:*)",
+      "Bash(gh auth:*)"
     ]
   }
 }
